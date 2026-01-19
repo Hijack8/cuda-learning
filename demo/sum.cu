@@ -12,77 +12,67 @@ do { \
     } \
 } while (0)
 
-/*
- * block-level reduction
- */
-__global__ void reduce_sum(const float* input, float* output, int n)
+// element-wise vector addition
+__global__ void vector_add(const float* a, const float* b, float* c, int n)
 {
-    extern __shared__ float sdata[];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    // load data
-    sdata[tid] = (idx < n) ? input[idx] : 0.0f;
-    __syncthreads();
-
-    // reduction in shared memory
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
-    }
-
-    // write result for this block
-    if (tid == 0) {
-        output[blockIdx.x] = sdata[0];
-    }
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n)
+        c[idx] = a[idx] + b[idx];
 }
 
 int main()
 {
-    const int N = 1 << 24;  // ~16M elements
+    const int N = 1 << 24; // ~16M elements
     const int threads = 256;
     const int blocks = (N + threads - 1) / threads;
 
     size_t bytes = N * sizeof(float);
-    size_t out_bytes = blocks * sizeof(float);
 
-    float *h_in = (float*)malloc(bytes);
-    float *h_out = (float*)malloc(out_bytes);
+    // allocate host memory
+    float *h_a = (float*)malloc(bytes);
+    float *h_b = (float*)malloc(bytes);
+    float *h_c = (float*)malloc(bytes);
 
-    for (int i = 0; i < N; i++)
-        h_in[i] = 1.0f;
+    // initialize
+    for (int i = 0; i < N; i++) {
+        h_a[i] = 1.0f;
+        h_b[i] = 2.0f;
+    }
 
-    float *d_in, *d_out;
-    CHECK(cudaMalloc(&d_in, bytes));
-    CHECK(cudaMalloc(&d_out, out_bytes));
+    // allocate device memory
+    float *d_a, *d_b, *d_c;
+    CHECK(cudaMalloc(&d_a, bytes));
+    CHECK(cudaMalloc(&d_b, bytes));
+    CHECK(cudaMalloc(&d_c, bytes));
 
-    CHECK(cudaMemcpy(d_in, h_in, bytes, cudaMemcpyHostToDevice));
+    // copy data to device
+    CHECK(cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice));
 
-    // warmup
-    reduce_sum<<<blocks, threads, threads * sizeof(float)>>>(d_in, d_out, N);
+    // launch kernel
+    vector_add<<<blocks, threads>>>(d_a, d_b, d_c, N);
     CHECK(cudaDeviceSynchronize());
 
-    // measured run
-    reduce_sum<<<blocks, threads, threads * sizeof(float)>>>(d_in, d_out, N);
-    CHECK(cudaDeviceSynchronize());
+    // copy result back
+    CHECK(cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost));
 
-    CHECK(cudaMemcpy(h_out, d_out, out_bytes, cudaMemcpyDeviceToHost));
+    // verify
+    int error_count = 0;
+    for (int i = 0; i < N; i++) {
+        if (h_c[i] != 3.0f) error_count++;
+    }
+    if (error_count == 0)
+        printf("Success! All results are correct.\n");
+    else
+        printf("Error! %d elements are wrong.\n", error_count);
 
-    // final reduction on CPU
-    float sum = 0.0f;
-    for (int i = 0; i < blocks; i++)
-        sum += h_out[i];
-
-    printf("Sum = %.0f (expected %.0f)\n", sum, (float)N);
-
-    cudaFree(d_in);
-    cudaFree(d_out);
-    free(h_in);
-    free(h_out);
+    // free memory
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    free(h_a);
+    free(h_b);
+    free(h_c);
 
     return 0;
 }
-
